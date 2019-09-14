@@ -7,7 +7,6 @@ import os
 import shutil
 import sys
 import time
-from distutils.core import run_setup
 
 from jinja2 import Template
 from release.bintray import BintrayAPI
@@ -16,6 +15,7 @@ from release.const import NAME
 from release.const import REPO_ROOT
 from release.downloader import BinaryDownloader
 from release.images import ImageManager
+from release.images import is_tag_latest
 from release.pypi import check_pypirc
 from release.pypi import pypi_upload
 from release.repository import delete_assets
@@ -205,7 +205,7 @@ def resume(args):
         delete_assets(gh_release)
         upload_assets(gh_release, files)
         img_manager = ImageManager(args.release)
-        img_manager.build_images(repository, files)
+        img_manager.build_images(repository)
     except ScriptError as e:
         print(e)
         return 1
@@ -245,7 +245,7 @@ def start(args):
         gh_release = create_release_draft(repository, args.release, pr_data, files)
         upload_assets(gh_release, files)
         img_manager = ImageManager(args.release)
-        img_manager.build_images(repository, files)
+        img_manager.build_images(repository)
     except ScriptError as e:
         print(e)
         return 1
@@ -259,7 +259,8 @@ def finalize(args):
     try:
         check_pypirc()
         repository = Repository(REPO_ROOT, args.repo)
-        img_manager = ImageManager(args.release)
+        tag_as_latest = is_tag_latest(args.release)
+        img_manager = ImageManager(args.release, tag_as_latest)
         pr_data = repository.find_release_pr(args.release)
         if not pr_data:
             raise ScriptError('No PR found for {}'.format(args.release))
@@ -276,7 +277,8 @@ def finalize(args):
 
         repository.checkout_branch(br_name)
 
-        run_setup(os.path.join(REPO_ROOT, 'setup.py'), script_args=['sdist', 'bdist_wheel'])
+        os.system('python {setup_script} sdist bdist_wheel'.format(
+            setup_script=os.path.join(REPO_ROOT, 'setup.py')))
 
         merge_status = pr_data.merge()
         if not merge_status.merged and not args.finalize_resume:

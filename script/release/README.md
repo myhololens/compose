@@ -40,7 +40,7 @@ This API token should be exposed to the release script through the
 ### A Bintray account and Bintray API key
 
 Your Bintray account will need to be an admin member of the
-[docker-compose organization](https://github.com/settings/tokens).
+[docker-compose organization](https://bintray.com/docker-compose).
 Additionally, you should generate a personal API key. To do so, click your
 username in the top-right hand corner and select "Edit profile" ; on the new
 page, select "API key" in the left-side menu.
@@ -129,7 +129,7 @@ assets public), proceed to the "Finalize a release" section of this guide.
 Once you're ready to make your release public, you may execute the following
 command from the root of the Compose repository:
 ```
-./script/release/release.sh -b <BINTRAY_USERNAME> finalize RELEAE_VERSION
+./script/release/release.sh -b <BINTRAY_USERNAME> finalize RELEASE_VERSION
 ```
 
 Note that this command will create and publish versioned assets to the public.
@@ -192,6 +192,8 @@ be handled manually by the operator:
     - Bump the version in `compose/__init__.py` to the *next* minor version
       number with `dev` appended. For example, if you just released `1.4.0`,
       update it to `1.5.0dev`
+    - Update compose_version in [github.com/docker/docker.github.io/blob/master/_config.yml](https://github.com/docker/docker.github.io/blob/master/_config.yml) and [github.com/docker/docker.github.io/blob/master/_config_authoring.yml](https://github.com/docker/docker.github.io/blob/master/_config_authoring.yml)
+    - Update the release note in [github.com/docker/docker.github.io](https://github.com/docker/docker.github.io/blob/master/release-notes/docker-compose.md)
 
 ## Advanced options
 

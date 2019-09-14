@@ -26,7 +26,7 @@ def split_env(env):
         key = env
     if re.search(r'\s', key):
         raise ConfigurationError(
-            "environment variable name '{}' may not contains whitespace.".format(key)
+            "environment variable name '{}' may not contain whitespace.".format(key)
         )
     return key, value
 
@@ -100,7 +100,7 @@ class Environment(dict):
                 except KeyError:
                     pass
             if not self.silent and key not in self.missing_keys:
-                log.warn(
+                log.warning(
                     "The {} variable is not set. Defaulting to a blank string."
                     .format(key)
                 )

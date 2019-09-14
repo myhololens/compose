@@ -6,6 +6,7 @@ import logging
 import operator
 import re
 from functools import reduce
+from os import path
 
 import enum
 import six
@@ -355,7 +356,8 @@ class Project(object):
         return containers
 
     def build(self, service_names=None, no_cache=False, pull=False, force_rm=False, memory=None,
-              build_args=None, gzip=False, parallel_build=False, rm=True, silent=False):
+              build_args=None, gzip=False, parallel_build=False, rm=True, silent=False, cli=False,
+              progress=None):
 
         services = []
         for service in self.get_services(service_names):
@@ -364,8 +366,17 @@ class Project(object):
             elif not silent:
                 log.info('%s uses an image, skipping' % service.name)
 
+        if cli:
+            log.warning("Native build is an experimental feature and could change at any time")
+            if parallel_build:
+                log.warning("Flag '--parallel' is ignored when building with "
+                            "COMPOSE_DOCKER_CLI_BUILD=1")
+            if gzip:
+                log.warning("Flag '--compress' is ignored when building with "
+                            "COMPOSE_DOCKER_CLI_BUILD=1")
+
         def build_service(service):
-            service.build(no_cache, pull, force_rm, memory, build_args, gzip, rm, silent)
+            service.build(no_cache, pull, force_rm, memory, build_args, gzip, rm, silent, cli, progress)
         if parallel_build:
             _, errors = parallel.parallel_execute(
                 services,
@@ -509,7 +520,11 @@ class Project(object):
            reset_container_image=False,
            renew_anonymous_volumes=False,
            silent=False,
+           cli=False,
            ):
+
+        if cli:
+            log.warning("Native build is an experimental feature and could change at any time")
 
         self.initialize()
         if not ignore_orphans:
@@ -523,7 +538,7 @@ class Project(object):
             include_deps=start_deps)
 
         for svc in services:
-            svc.ensure_image_exists(do_build=do_build, silent=silent)
+            svc.ensure_image_exists(do_build=do_build, silent=silent, cli=cli)
         plans = self._get_convergence_plans(
             services, strategy, always_recreate_deps=always_recreate_deps)
 
@@ -586,8 +601,10 @@ class Project(object):
                           ", ".join(updated_dependencies))
                 containers_stopped = any(
                     service.containers(stopped=True, filters={'status': ['created', 'exited']}))
-                has_links = any(c.get('HostConfig.Links') for c in service.containers())
-                if always_recreate_deps or containers_stopped or not has_links:
+                service_has_links = any(service.get_link_names())
+                container_has_links = any(c.get('HostConfig.Links') for c in service.containers())
+                should_recreate_for_links = service_has_links ^ container_has_links
+                if always_recreate_deps or containers_stopped or should_recreate_for_links:
                     plan = service.convergence_plan(ConvergenceStrategy.always)
                 else:
                     plan = service.convergence_plan(strategy)
@@ -601,6 +618,9 @@ class Project(object):
     def pull(self, service_names=None, ignore_pull_failures=False, parallel_pull=False, silent=False,
              include_deps=False):
         services = self.get_services(service_names, include_deps)
+        images_to_build = {service.image_name for service in services if service.can_be_built()}
+        services_to_pull = [service for service in services if service.image_name not in images_to_build]
+
         msg = not silent and 'Pulling' or None
 
         if parallel_pull:
@@ -626,7 +646,7 @@ class Project(object):
                     )
 
             _, errors = parallel.parallel_execute(
-                services,
+                services_to_pull,
                 pull_service,
                 operator.attrgetter('name'),
                 msg,
@@ -639,7 +659,7 @@ class Project(object):
                 raise ProjectError(combined_errors)
 
         else:
-            for service in services:
+            for service in services_to_pull:
                 service.pull(ignore_pull_failures, silent=silent)
 
     def push(self, service_names=None, ignore_push_failures=False):
@@ -685,7 +705,7 @@ class Project(object):
 
     def find_orphan_containers(self, remove_orphans):
         def _find():
-            containers = self._labeled_containers()
+            containers = set(self._labeled_containers() + self._labeled_containers(stopped=True))
             for ctnr in containers:
                 service_name = ctnr.labels.get(LABEL_SERVICE)
                 if service_name not in self.service_names:
@@ -696,7 +716,10 @@ class Project(object):
         if remove_orphans:
             for ctnr in orphans:
                 log.info('Removing orphan container "{0}"'.format(ctnr.name))
-                ctnr.kill()
+                try:
+                    ctnr.kill()
+                except APIError:
+                    pass
                 ctnr.remove(force=True)
         else:
             log.warning(
@@ -771,13 +794,13 @@ def get_secrets(service, service_secrets, secret_defs):
                 .format(service=service, secret=secret.source))
 
         if secret_def.get('external'):
-            log.warn("Service \"{service}\" uses secret \"{secret}\" which is external. "
-                     "External secrets are not available to containers created by "
-                     "docker-compose.".format(service=service, secret=secret.source))
+            log.warning("Service \"{service}\" uses secret \"{secret}\" which is external. "
+                        "External secrets are not available to containers created by "
+                        "docker-compose.".format(service=service, secret=secret.source))
             continue
 
         if secret.uid or secret.gid or secret.mode:
-            log.warn(
+            log.warning(
                 "Service \"{service}\" uses secret \"{secret}\" with uid, "
                 "gid, or mode. These fields are not supported by this "
                 "implementation of the Compose file".format(
@@ -785,7 +808,15 @@ def get_secrets(service, service_secrets, secret_defs):
                 )
             )
 
-        secrets.append({'secret': secret, 'file': secret_def.get('file')})
+        secret_file = secret_def.get('file')
+        if not path.isfile(str(secret_file)):
+            log.warning(
+                "Service \"{service}\" uses an undefined secret file \"{secret_file}\", "
+                "the following folder is created \"{secret_file}\"".format(
+                    service=service, secret_file=secret_file
+                )
+            )
+        secrets.append({'secret': secret, 'file': secret_file})
 
     return secrets
 

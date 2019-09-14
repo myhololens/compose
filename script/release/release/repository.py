@@ -175,6 +175,7 @@ class Repository(object):
     def write_git_sha(self):
         with open(os.path.join(REPO_ROOT, 'compose', 'GITSHA'), 'w') as f:
             f.write(self.git_repo.head.commit.hexsha[:7])
+        return self.git_repo.head.commit.hexsha[:7]
 
     def cherry_pick_prs(self, release_branch, ids):
         if not ids:
@@ -219,6 +220,8 @@ def get_contributors(pr_data):
     commits = pr_data.get_commits()
     authors = {}
     for commit in commits:
+        if not commit or not commit.author or not commit.author.login:
+            continue
         author = commit.author.login
         authors[author] = authors.get(author, 0) + 1
     return [x[0] for x in sorted(list(authors.items()), key=lambda x: x[1])]

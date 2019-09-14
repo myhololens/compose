@@ -11,6 +11,7 @@ import subprocess
 import time
 from collections import Counter
 from collections import namedtuple
+from functools import reduce
 from operator import attrgetter
 
 import pytest
@@ -19,6 +20,7 @@ import yaml
 from docker import errors
 
 from .. import mock
+from ..helpers import BUSYBOX_IMAGE_WITH_TAG
 from ..helpers import create_host_file
 from compose.cli.command import get_project
 from compose.config.errors import DuplicateOverrideFileFound
@@ -40,7 +42,7 @@ ProcessResult = namedtuple('ProcessResult', 'stdout stderr')
 
 
 BUILD_CACHE_TEXT = 'Using cache'
-BUILD_PULL_TEXT = 'Status: Image is up to date for busybox:latest'
+BUILD_PULL_TEXT = 'Status: Image is up to date for busybox:1.27.2'
 
 
 def start_process(base_dir, options):
@@ -60,6 +62,12 @@ def wait_on_process(proc, returncode=0):
         print("Stdout: {}".format(stdout))
         assert proc.returncode == returncode
     return ProcessResult(stdout.decode('utf-8'), stderr.decode('utf-8'))
+
+
+def dispatch(base_dir, options, project_options=None, returncode=0):
+    project_options = project_options or []
+    proc = start_process(base_dir, project_options + options)
+    return wait_on_process(proc, returncode=returncode)
 
 
 def wait_on_condition(condition, delay=0.1, timeout=40):
@@ -149,9 +157,7 @@ class CLITestCase(DockerClientTestCase):
         return self._project
 
     def dispatch(self, options, project_options=None, returncode=0):
-        project_options = project_options or []
-        proc = start_process(self.base_dir, project_options + options)
-        return wait_on_process(proc, returncode=returncode)
+        return dispatch(self.base_dir, options, project_options, returncode)
 
     def execute(self, container, cmd):
         # Remove once Hijack and CloseNotifier sign a peace treaty
@@ -265,7 +271,7 @@ class CLITestCase(DockerClientTestCase):
                     'volumes_from': ['service:other:rw'],
                 },
                 'other': {
-                    'image': 'busybox:latest',
+                    'image': BUSYBOX_IMAGE_WITH_TAG,
                     'command': 'top',
                     'volumes': ['/data'],
                 },
@@ -354,7 +360,7 @@ class CLITestCase(DockerClientTestCase):
             'services': {
                 'web': {
                     'command': 'echo uwu',
-                    'image': 'alpine:3.4',
+                    'image': 'alpine:3.10.1',
                     'ports': ['3341/tcp', '4449/tcp']
                 }
             },
@@ -553,7 +559,7 @@ class CLITestCase(DockerClientTestCase):
             'services': {
                 'foo': {
                     'command': '/bin/true',
-                    'image': 'alpine:3.7',
+                    'image': 'alpine:3.10.1',
                     'scale': 3,
                     'restart': 'always:7',
                     'mem_limit': '300M',
@@ -638,7 +644,7 @@ class CLITestCase(DockerClientTestCase):
     def test_pull_with_digest(self):
         result = self.dispatch(['-f', 'digest.yml', 'pull', '--no-parallel'])
 
-        assert 'Pulling simple (busybox:latest)...' in result.stderr
+        assert 'Pulling simple ({})...'.format(BUSYBOX_IMAGE_WITH_TAG) in result.stderr
         assert ('Pulling digest (busybox@'
                 'sha256:38a203e1986cf79639cfb9b2e1d6e773de84002feea2d4eb006b520'
                 '04ee8502d)...') in result.stderr
@@ -649,11 +655,18 @@ class CLITestCase(DockerClientTestCase):
             'pull', '--ignore-pull-failures', '--no-parallel']
         )
 
-        assert 'Pulling simple (busybox:latest)...' in result.stderr
+        assert 'Pulling simple ({})...'.format(BUSYBOX_IMAGE_WITH_TAG) in result.stderr
         assert 'Pulling another (nonexisting-image:latest)...' in result.stderr
         assert ('repository nonexisting-image not found' in result.stderr or
                 'image library/nonexisting-image:latest not found' in result.stderr or
                 'pull access denied for nonexisting-image' in result.stderr)
+
+    def test_pull_with_build(self):
+        result = self.dispatch(['-f', 'pull-with-build.yml', 'pull'])
+
+        assert 'Pulling simple' not in result.stderr
+        assert 'Pulling from_simple' not in result.stderr
+        assert 'Pulling another ...' in result.stderr
 
     def test_pull_with_quiet(self):
         assert self.dispatch(['pull', '--quiet']).stderr == ''
@@ -680,15 +693,15 @@ class CLITestCase(DockerClientTestCase):
         self.base_dir = 'tests/fixtures/links-composefile'
         result = self.dispatch(['pull', '--no-parallel', 'web'])
         assert sorted(result.stderr.split('\n'))[1:] == [
-            'Pulling web (busybox:latest)...',
+            'Pulling web (busybox:1.27.2)...',
         ]
 
     def test_pull_with_include_deps(self):
         self.base_dir = 'tests/fixtures/links-composefile'
         result = self.dispatch(['pull', '--no-parallel', '--include-deps', 'web'])
         assert sorted(result.stderr.split('\n'))[1:] == [
-            'Pulling db (busybox:latest)...',
-            'Pulling web (busybox:latest)...',
+            'Pulling db (busybox:1.27.2)...',
+            'Pulling web (busybox:1.27.2)...',
         ]
 
     def test_build_plain(self):
@@ -769,6 +782,7 @@ class CLITestCase(DockerClientTestCase):
         ]
         assert not containers
 
+    @pytest.mark.xfail(True, reason='Flaky on local')
     def test_build_rm(self):
         containers = [
             Container.from_ps(self.project.client, c)
@@ -785,6 +799,9 @@ class CLITestCase(DockerClientTestCase):
             for c in self.project.client.containers(all=True)
         ]
         assert containers
+
+        for c in self.project.client.containers(all=True):
+            self.addCleanup(self.project.client.remove_container, c, force=True)
 
     def test_build_shm_size_build_option(self):
         pull_busybox(self.client)
@@ -1148,6 +1165,22 @@ class CLITestCase(DockerClientTestCase):
         assert len(remote_volumes) > 0
 
     @v2_only()
+    def test_up_no_start_remove_orphans(self):
+        self.base_dir = 'tests/fixtures/v2-simple'
+        self.dispatch(['up', '--no-start'], None)
+
+        services = self.project.get_services()
+
+        stopped = reduce((lambda prev, next: prev.containers(
+            stopped=True) + next.containers(stopped=True)), services)
+        assert len(stopped) == 2
+
+        self.dispatch(['-f', 'one-container.yml', 'up', '--no-start', '--remove-orphans'], None)
+        stopped2 = reduce((lambda prev, next: prev.containers(
+            stopped=True) + next.containers(stopped=True)), services)
+        assert len(stopped2) == 1
+
+    @v2_only()
     def test_up_no_ansi(self):
         self.base_dir = 'tests/fixtures/v2-simple'
         result = self.dispatch(['--no-ansi', 'up', '-d'], None)
@@ -1419,7 +1452,7 @@ class CLITestCase(DockerClientTestCase):
             if v['Name'].split('/')[-1].startswith('{}_'.format(self.project.name))
         ]
 
-        assert set([v['Name'].split('/')[-1] for v in volumes]) == set([volume_with_label])
+        assert set([v['Name'].split('/')[-1] for v in volumes]) == {volume_with_label}
         assert 'label_key' in volumes[0]['Labels']
         assert volumes[0]['Labels']['label_key'] == 'label_val'
 
@@ -2084,7 +2117,7 @@ class CLITestCase(DockerClientTestCase):
             for _, config in networks.items():
                 # TODO: once we drop support for API <1.24, this can be changed to:
                 # assert config['Aliases'] == [container.short_id]
-                aliases = set(config['Aliases'] or []) - set([container.short_id])
+                aliases = set(config['Aliases'] or []) - {container.short_id}
                 assert not aliases
 
     @v2_only()
@@ -2104,7 +2137,7 @@ class CLITestCase(DockerClientTestCase):
         for _, config in networks.items():
             # TODO: once we drop support for API <1.24, this can be changed to:
             # assert config['Aliases'] == [container.short_id]
-            aliases = set(config['Aliases'] or []) - set([container.short_id])
+            aliases = set(config['Aliases'] or []) - {container.short_id}
             assert not aliases
 
         assert self.lookup(container, 'app')
@@ -2340,6 +2373,7 @@ class CLITestCase(DockerClientTestCase):
         assert 'another' in result.stdout
         assert 'exited with code 0' in result.stdout
 
+    @pytest.mark.skip(reason="race condition between up and logs")
     def test_logs_follow_logs_from_new_containers(self):
         self.base_dir = 'tests/fixtures/logs-composefile'
         self.dispatch(['up', '-d', 'simple'])
@@ -2366,6 +2400,7 @@ class CLITestCase(DockerClientTestCase):
         assert '{} exited with code 0'.format(another_name) in result.stdout
         assert '{} exited with code 137'.format(simple_name) in result.stdout
 
+    @pytest.mark.skip(reason="race condition between up and logs")
     def test_logs_follow_logs_from_restarted_containers(self):
         self.base_dir = 'tests/fixtures/logs-restart-composefile'
         proc = start_process(self.base_dir, ['up'])
@@ -2386,6 +2421,7 @@ class CLITestCase(DockerClientTestCase):
         ) == 3
         assert result.stdout.count('world') == 3
 
+    @pytest.mark.skip(reason="race condition between up and logs")
     def test_logs_default(self):
         self.base_dir = 'tests/fixtures/logs-composefile'
         self.dispatch(['up', '-d'])
@@ -2639,7 +2675,7 @@ class CLITestCase(DockerClientTestCase):
 
         container, = self.project.containers()
         expected_template = ' container {} {}'
-        expected_meta_info = ['image=busybox:latest', 'name=simple-composefile_simple_']
+        expected_meta_info = ['image=busybox:1.27.2', 'name=simple-composefile_simple_']
 
         assert expected_template.format('create', container.id) in lines[0]
         assert expected_template.format('start', container.id) in lines[1]
@@ -2711,7 +2747,7 @@ class CLITestCase(DockerClientTestCase):
         self.base_dir = 'tests/fixtures/extends'
         self.dispatch(['up', '-d'], None)
 
-        assert set([s.name for s in self.project.services]) == set(['mydb', 'myweb'])
+        assert set([s.name for s in self.project.services]) == {'mydb', 'myweb'}
 
         # Sort by name so we get [db, web]
         containers = sorted(
@@ -2723,15 +2759,9 @@ class CLITestCase(DockerClientTestCase):
         web = containers[1]
         db_name = containers[0].name_without_project
 
-        assert set(get_links(web)) == set(
-            ['db', db_name, 'extends_{}'.format(db_name)]
-        )
+        assert set(get_links(web)) == {'db', db_name, 'extends_{}'.format(db_name)}
 
-        expected_env = set([
-            "FOO=1",
-            "BAR=2",
-            "BAZ=2",
-        ])
+        expected_env = {"FOO=1", "BAR=2", "BAZ=2"}
         assert expected_env <= set(web.get('Config.Env'))
 
     def test_top_services_not_running(self):
